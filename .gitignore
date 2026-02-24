@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+
+.DS_Store
+.direnv/
+.env
+.envrc
+*.db
+.gpv
+test_project/
