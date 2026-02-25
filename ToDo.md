@@ -1,0 +1,5 @@
+- [ ] commit.py L173-177- block of code that deterines the order of the sub-prompts is bizarre - see comment "Result: current_type_order = [types from the commit, in commit order] + [types from the current master that were not in the commit]." It may not be wrong, but it doesn't make a lick of sense to me.
+- [ ] gpv commit - What if the user reorders the sub-prompts (by editing their filesname prefixes) without modifying their contents? With the current logic the sub-prompt version numbers wouldn't change, and therefore a new master would not be created. BUT probably a new master should be created.
+- [ ] gpv commit - What happens if the user appends/inserts/deletes a subprompt (without changing any existing sub-prompt content) - Same as above, how do we handle versioning of the master? Is a new master created?
+- [X] gpv commit - Sub-prompt type repetition exclusion. We need a rule that there can only be one of any given type of sub-prompt in a master. Should throw an error if commit would violate this rule.
+

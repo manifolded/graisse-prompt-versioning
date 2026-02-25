@@ -188,6 +188,7 @@ Print details of current master prompt: id, version, commit_message, created_at,
 
 - **No defaults:** Every missing required value (DB path, message, paths) raises an error.
 - **Explicit paths:** When paths are required, user must provide them.
+- **No repeated types in master:** Each sub-prompt type may appear at most once in a master prompt. `gpv commit` raises two distinct errors: (1) `DuplicateTypeInCommitError` when multiple files in the commit share the same type; (2) `DuplicateTypeInCurrentError` when the current master already has duplicate types (e.g. from legacy data or manual DB edits).
 - **Duplicate content:** Attempt to insert duplicate `contents` → IntegrityError, surface to user.
 - **Uniqueness violations:** Partial unique index on `is_current` → clear error on failure.
 

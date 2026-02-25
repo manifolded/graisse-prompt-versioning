@@ -24,6 +24,14 @@ class CommitError(Exception):
     """Commit error."""
 
 
+class DuplicateTypeInCommitError(CommitError):
+    """Raised when the commit would add multiple files with the same sub-prompt type."""
+
+
+class DuplicateTypeInCurrentError(CommitError):
+    """Raised when the current master already has duplicate sub-prompt types."""
+
+
 def extract_type_from_filename(filename: str) -> str:
     """
     Extract type from filename *_<type>.j2 -> extract between first underscore and .j2
@@ -79,12 +87,15 @@ def run_commit(
     cwd = cwd or Path.cwd()
 
     if paths is None:
-        paths = list(cwd.glob("*.j2"))
+        # glob() returns files in arbitrary order (filesystem-dependent); sort by name
+        # so sub-prompts follow filename prefix order (e.g. 01_intro, 02_body).
+        paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
     else:
         for p in paths:
             if not p.exists():
                 raise CommitError(f"Path does not exist: {p}")
-        paths = [p for p in paths if p.name.endswith(".j2")]
+        # Sort by name for consistent sub-prompt order.
+        paths = sorted([p for p in paths if p.name.endswith(".j2")], key=lambda p: p.name)
 
     branch_by_path = {}
     if branch_specs:
@@ -107,6 +118,17 @@ def run_commit(
     if not files_data:
         print("Nothing to commit. No .j2 files or no changes.")
         return
+
+    # Detect duplicate types in commit (multiple files with same type); raise if any.
+    seen: dict[str, list[str]] = {}
+    for path, _, type_name in files_data:
+        seen.setdefault(type_name, []).append(str(path.name))
+    duplicates = {t: paths for t, paths in seen.items() if len(paths) > 1}
+    if duplicates:
+        dup_desc = "; ".join(f"{t} ({', '.join(p)})" for t, p in duplicates.items())
+        raise DuplicateTypeInCommitError(
+            f"Multiple files with same sub-prompt type in commit: {dup_desc}"
+        )
 
     conn = connect(db_path)
     try:
@@ -167,10 +189,15 @@ def run_commit(
             inserted_any = True
 
         current_ids = master_contents_to_ids(current["contents"]) if current else []
-        current_type_order = [row["type"] for row in current_subs]
-        for _, _, type_name in files_data:
-            if type_name not in current_type_order:
-                current_type_order.append(type_name)
+        types_in_commit = {type_name for _, _, type_name in files_data}
+        current_type_order = [type_name for _, _, type_name in files_data]
+        for row in current_subs:
+            if row["type"] not in types_in_commit:
+                if row["type"] in current_type_order:
+                    raise DuplicateTypeInCurrentError(
+                        f"Current master has duplicate sub-prompt type '{row['type']}'"
+                    )
+                current_type_order.append(row["type"])
 
         new_ids: list[int] = []
         for t in current_type_order:
