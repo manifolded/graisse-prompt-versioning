@@ -32,6 +32,14 @@ class DuplicateTypeInCurrentError(CommitError):
     """Raised when the current master already has duplicate sub-prompt types."""
 
 
+class PartialCommitAddsNewTypeError(CommitError):
+    """Raised when a partial commit would add types not in the current master."""
+
+
+class PartialCommitMissingCwdFileError(CommitError):
+    """Raised when a partial commit would keep a type that has no .j2 file in CWD."""
+
+
 def extract_type_from_filename(filename: str) -> str:
     """
     Extract type from filename *_<type>.j2 -> extract between first underscore and .j2
@@ -90,12 +98,14 @@ def run_commit(
         # glob() returns files in arbitrary order (filesystem-dependent); sort by name
         # so sub-prompts follow filename prefix order (e.g. 01_intro, 02_body).
         paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
+        is_full_commit = True
     else:
         for p in paths:
             if not p.exists():
                 raise CommitError(f"Path does not exist: {p}")
         # Sort by name for consistent sub-prompt order.
         paths = sorted([p for p in paths if p.name.endswith(".j2")], key=lambda p: p.name)
+        is_full_commit = False
 
     branch_by_path = {}
     if branch_specs:
@@ -190,14 +200,34 @@ def run_commit(
 
         current_ids = master_contents_to_ids(current["contents"]) if current else []
         types_in_commit = {type_name for _, _, type_name in files_data}
-        current_type_order = [type_name for _, _, type_name in files_data]
-        for row in current_subs:
-            if row["type"] not in types_in_commit:
-                if row["type"] in current_type_order:
-                    raise DuplicateTypeInCurrentError(
-                        f"Current master has duplicate sub-prompt type '{row['type']}'"
-                    )
-                current_type_order.append(row["type"])
+        types_in_current = {row["type"] for row in current_subs}
+
+        if current and not is_full_commit:
+            new_types = types_in_commit - types_in_current
+            if new_types:
+                raise PartialCommitAddsNewTypeError(
+                    f"Cannot add new types in partial commit: {', '.join(sorted(new_types))}. "
+                    "Commit all files to add new types."
+                )
+
+        all_paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
+        canonical_order = [extract_type_from_filename(p.name) for p in all_paths]
+        types_needed = types_in_commit if is_full_commit else (types_in_commit | types_in_current)
+        current_type_order = [t for t in canonical_order if t in types_needed]
+        if not is_full_commit:
+            seen_uncommitted: set[str] = set()
+            for row in current_subs:
+                if row["type"] not in types_in_commit:
+                    if row["type"] not in canonical_order:
+                        raise PartialCommitMissingCwdFileError(
+                            f"Partial commit cannot include type '{row['type']}': "
+                            "no corresponding .j2 file in CWD"
+                        )
+                    if row["type"] in seen_uncommitted:
+                        raise DuplicateTypeInCurrentError(
+                            f"Current master has duplicate sub-prompt type '{row['type']}'"
+                        )
+                    seen_uncommitted.add(row["type"])
 
         new_ids: list[int] = []
         for t in current_type_order:

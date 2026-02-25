@@ -25,7 +25,7 @@ def test_uncommit_restores_database_state(tmp_path: Path) -> None:
     finally:
         conn.close()
 
-    commit.run_commit(message="Second", paths=[tmp_path / "b_body.j2"], cwd=tmp_path)
+    commit.run_commit(message="Second", cwd=tmp_path)
     uncommit.run_uncommit(cwd=tmp_path, confirm=False)
 
     conn = connect(get_db_path(tmp_path))

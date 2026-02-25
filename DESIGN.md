@@ -143,20 +143,21 @@ Version strings are period-separated integers. The first row of a type has `vers
 
 All commit variants create a new master prompt. Master prompt insert and update are performed in a single transaction.
 
-**gpv commit [-no-validate] -m "{message}"**
+**gpv commit [-no-j2-validate] -m "{message}"**
 
+- Full commit includes only types with files in CWD. Types in the current master whose files were removed from CWD are dropped from the new master.
 - Scan CWD for `*.j2` files. Non-.j2 files are always ignored.
-- Optional jinja2 validation (default: yes); use `-no-validate` to skip.
+- Optional jinja2 validation (default: yes); use `-no-j2-validate` to skip.
 - For each file: compare contents to `sub_prompts`; if different and not already stored, insert new row. Parent = sub-prompt whose FK appears in the current master prompt's contents (JSON list) and whose type matches; if none, parent is null.
 - Build new master prompt: list of sub-prompt IDs (use new IDs where updated, existing where unchanged).
 - In a single transaction: insert new master_prompts row with `is_current = 1` and set previous current row to `is_current = 0`.
 - If no `.j2` files or no changes, exit with a message saying nothing was done.
 
-**gpv commit [-no-validate] -m "{message}" {path} [{path} ...]**
+**gpv commit [-no-j2-validate] -m "{message}" {path} [{path} ...]**
 
 - Same as above but only process the listed file paths. Paths are relative to CWD or absolute. Validate each path exists. Non-.j2 files are ignored.
 
-**gpv commit [-no-validate] -branch {parent_pk} {path} [-branch {parent_pk} {path} ...] -m "{message}"**
+**gpv commit [-no-j2-validate] -branch {parent_pk} {path} [-branch {parent_pk} {path} ...] -m "{message}"**
 
 - Each `-branch` takes two arguments: parent PK and path. May be repeated to branch multiple sub-prompts in a single invocation.
 - Force branch versioning for each specified sub-prompt.
@@ -188,7 +189,10 @@ Print details of current master prompt: id, version, commit_message, created_at,
 
 - **No defaults:** Every missing required value (DB path, message, paths) raises an error.
 - **Explicit paths:** When paths are required, user must provide them.
-- **No repeated types in master:** Each sub-prompt type may appear at most once in a master prompt. `gpv commit` raises two distinct errors: (1) `DuplicateTypeInCommitError` when multiple files in the commit share the same type; (2) `DuplicateTypeInCurrentError` when the current master already has duplicate types (e.g. from legacy data or manual DB edits).
+- **No repeated types in master:**
+  - Each sub-prompt type may appear at most once in a master prompt. `gpv commit` raises two distinct errors: (1) `DuplicateTypeInCommitError` when multiple files in the commit share the same type; (2) `DuplicateTypeInCurrentError` when the current master already has duplicate types (e.g. from manual DB edits).
+  - When adding types not in the current master, the commit must include all current types (full commit). Partial commits that only update existing types are allowed. `PartialCommitAddsNewTypeError` is raised when a partial commit would add new types.
+  - Partial commits require every uncommitted type (in current master but not in the commit) to have a corresponding `.j2` file in CWD. `PartialCommitMissingCwdFileError` is raised when a partial commit would keep a type that has no file in CWD. This is necessary to define the order of the sub-prompts.
 - **Duplicate content:** Attempt to insert duplicate `contents` → IntegrityError, surface to user.
 - **Uniqueness violations:** Partial unique index on `is_current` → clear error on failure.
 

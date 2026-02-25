@@ -33,7 +33,7 @@ def init_cmd() -> None:
 
 
 @cli.command("commit")
-@click.option("-no-validate", "no_validate", is_flag=True, help="Skip jinja2 validation")
+@click.option("-no-j2-validate", "no_validate", is_flag=True, help="Skip jinja2 validation")
 @click.option("-m", "message", required=True, help="Commit message")
 @click.option("-branch", "branch_specs", nargs=2, type=(int, click.Path(path_type=Path)), multiple=True)
 @click.argument("paths", nargs=-1, type=click.Path(path_type=Path, exists=True))
