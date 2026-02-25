@@ -22,6 +22,23 @@ def branch_version(parent_version: str) -> str:
     return f"{parent_version}.1"
 
 
+def version_gt(new_version: str, old_version: str) -> bool:
+    """
+    True if new_version is later than old_version.
+    Compares segment-by-segment numerically (e.g. 4.4 > 4.3, 4.3.1 > 4.3).
+    """
+    parts_new = [int(x) for x in new_version.split(".")]
+    parts_old = [int(x) for x in old_version.split(".")]
+    for i in range(max(len(parts_new), len(parts_old))):
+        vn = parts_new[i] if i < len(parts_new) else 0
+        vo = parts_old[i] if i < len(parts_old) else 0
+        if vn > vo:
+            return True
+        if vn < vo:
+            return False
+    return False
+
+
 def version_segment_count(version: str) -> int:
     """Number of segments in a version string (e.g. '4.3.1' -> 3)."""
     return len(version.split("."))

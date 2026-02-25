@@ -2,7 +2,7 @@
 
 import pytest
 
-from gpv.versioning import branch_version, increment_version, is_branched
+from gpv.versioning import branch_version, increment_version, is_branched, version_gt
 
 
 def test_increment_first_of_type() -> None:
@@ -23,3 +23,11 @@ def test_is_branched() -> None:
     assert is_branched("4.3.1", "4.3") is True
     assert is_branched("4.4", "4.3") is False
     assert is_branched("4.3", "4.3") is False
+
+
+def test_version_gt() -> None:
+    assert version_gt("4.4", "4.3") is True
+    assert version_gt("4.3.1", "4.3") is True
+    assert version_gt("4.3", "4.3.1") is False
+    assert version_gt("4.3", "4.3") is False
+    assert version_gt("4.2", "4.1.1") is True
