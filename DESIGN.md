@@ -145,7 +145,7 @@ All commit variants create a new master prompt. Master prompt insert and update 
 
 **gpv commit [-no-validate] -m "{message}"**
 
-- Scan CWD for `*.j2` files.
+- Scan CWD for `*.j2` files. Non-.j2 files are always ignored.
 - Optional jinja2 validation (default: yes); use `-no-validate` to skip.
 - For each file: compare contents to `sub_prompts`; if different and not already stored, insert new row. Parent = sub-prompt whose FK appears in the current master prompt's contents (JSON list) and whose type matches; if none, parent is null.
 - Build new master prompt: list of sub-prompt IDs (use new IDs where updated, existing where unchanged).
@@ -154,7 +154,7 @@ All commit variants create a new master prompt. Master prompt insert and update 
 
 **gpv commit [-no-validate] -m "{message}" {path} [{path} ...]**
 
-- Same as above but only process the listed file paths. Paths are relative to CWD or absolute. Validate each path exists and ends with `.j2`.
+- Same as above but only process the listed file paths. Paths are relative to CWD or absolute. Validate each path exists. Non-.j2 files are ignored.
 
 **gpv commit [-no-validate] -branch {parent_pk} {path} [-branch {parent_pk} {path} ...] -m "{message}"**
 

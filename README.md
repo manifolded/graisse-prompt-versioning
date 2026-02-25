@@ -2,7 +2,7 @@
 
 CLI utility for prompt versioning where the prompt is assembled from jinja2 sub-prompt template files. Relies on a local SQLite database.
 
-**Sub-prompt file naming:** The prefix of each filename defines the order in which sub-prompts are concatenated to generate the prompt. Use zero-padded numeric prefixes (e.g. `01`, `02`, `03`...) so that files sort correctly in directory listings. For example, `01_intro.j2`, `02_body.j2`, `03_outro.j2` will be assembled in that order. The segment after the first underscore determines the sub-prompt type (e.g. `01_intro_section.j2` has type `intro_section`).
+**Sub-prompt file naming:** The prefix of each filename defines the order in which sub-prompts are concatenated to generate the prompt. Use zero-padded numeric prefixes (e.g. `01`, `02`, `03`...) so that files sort correctly in directory listings. For example, `01_intro.j2`, `02_body.j2`, `03_outro.j2` will be assembled in that order. The segment after the first underscore determines the sub-prompt type (e.g. `01_intro_section.j2` has type `intro_section`). Non-.j2 files are always ignored by `gpv commit`.
 
 **Working directory:** The current working directory (CWD) matters when invoking gpv. You must run gpv from the directory containing `.gpv`. When `gpv commit` is invoked with explicit paths (including absolute paths), the `.gpv` file in the CWD is used—not the `.gpv` in the target file's directory.
 

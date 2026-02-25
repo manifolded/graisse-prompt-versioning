@@ -84,8 +84,7 @@ def run_commit(
         for p in paths:
             if not p.exists():
                 raise CommitError(f"Path does not exist: {p}")
-            if not p.name.endswith(".j2"):
-                raise CommitError(f"Path must end with .j2: {p}")
+        paths = [p for p in paths if p.name.endswith(".j2")]
 
     branch_by_path = {}
     if branch_specs:
