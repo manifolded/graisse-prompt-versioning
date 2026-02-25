@@ -9,11 +9,9 @@ from ..db import (
     delete_sub_prompts,
     get_current_master,
     get_previous_master,
-    get_sub_prompts_by_ids,
     master_contents_to_ids,
     set_current_master,
 )
-from ..versioning import version_gt
 
 
 class UncommitError(Exception):
@@ -45,22 +43,9 @@ def run_uncommit(cwd: Path | None = None, confirm: bool = True) -> None:
             print("Aborted.")
             return
 
-    current_ids = master_contents_to_ids(current["contents"])
-    previous_ids = master_contents_to_ids(previous["contents"])
-    current_subs = get_sub_prompts_by_ids(conn, current_ids)
-    previous_subs = get_sub_prompts_by_ids(conn, previous_ids)
-    current_by_type = {row["type"]: (row["id"], row["version"]) for row in current_subs}
-    previous_by_type = {row["type"]: (row["id"], row["version"]) for row in previous_subs}
-
-    to_delete: list[int] = []
-    for sub_type, (sub_id, sub_version) in current_by_type.items():
-        prev = previous_by_type.get(sub_type)
-        if prev is None:
-            to_delete.append(sub_id)
-        else:
-            _, prev_version = prev
-            if version_gt(sub_version, prev_version):
-                to_delete.append(sub_id)
+    current_ids = set(master_contents_to_ids(current["contents"]))
+    previous_ids = set(master_contents_to_ids(previous["contents"]))
+    to_delete = list(current_ids - previous_ids)
 
     with conn:
         delete_master_prompt(conn, current["id"])

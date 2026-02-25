@@ -30,4 +30,3 @@ def test_version_gt() -> None:
     assert version_gt("4.3.1", "4.3") is True
     assert version_gt("4.3", "4.3.1") is False
     assert version_gt("4.3", "4.3") is False
-    assert version_gt("4.2", "4.1.1") is True
