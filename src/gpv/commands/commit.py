@@ -142,6 +142,286 @@ def validate_jinja2(contents: str) -> None:
     Environment().from_string(contents)
 
 
+def _build_files_data(
+    paths: list[Path],
+    no_validate: bool,
+) -> list[tuple[Path, str, str]]:
+    """Build (path, contents, type_name) list from paths. Raises on invalid jinja2 if no_validate is False."""
+    result: list[tuple[Path, str, str]] = []
+    for p in paths:
+        p = p.resolve() if not p.is_absolute() else p
+        contents = p.read_text()
+        type_name = parse_filename(p.name)[1]
+        if not no_validate:
+            try:
+                validate_jinja2(contents)
+            except TemplateSyntaxError as e:
+                raise CommitError(f"Invalid jinja2 in {p}: {e}") from e
+        result.append((p, contents, type_name))
+    return result
+
+
+def _check_duplicate_types_in_commit(files_data: list[tuple[Path, str, str]]) -> None:
+    """Raise DuplicateTypeInCommitError if multiple files share the same type."""
+    seen: dict[str, list[str]] = {}
+    for path, _, type_name in files_data:
+        seen.setdefault(type_name, []).append(str(path.name))
+    duplicates = {t: names for t, names in seen.items() if len(names) > 1}
+    if duplicates:
+        dup_desc = "; ".join(f"{t} ({', '.join(n)})" for t, n in duplicates.items())
+        raise DuplicateTypeInCommitError(
+            f"Multiple files with same sub-prompt type in commit: {dup_desc}"
+        )
+
+
+def _insert_sub_prompts(
+    conn,
+    files_data: list[tuple[Path, str, str]],
+    current: dict | None,
+    current_subs: list,
+    branch_by_path: dict,
+    message: str,
+) -> tuple[dict[str, int], dict[int, str], dict[int, str], bool]:
+    """
+    Insert or reuse sub-prompts for each file. Returns (type_to_id, id_to_version, id_to_type, inserted_any).
+    """
+    type_to_id: dict[str, int] = {}
+    id_to_version: dict[int, str] = {}
+    id_to_type: dict[int, str] = {}
+    inserted_any = False
+
+    for path, contents, type_name in files_data:
+        existing = get_sub_prompt_by_contents(conn, contents)
+        if existing:
+            type_to_id[type_name] = existing["id"]
+            id_to_version[existing["id"]] = existing["version"]
+            id_to_type[existing["id"]] = existing["type"]
+            continue
+
+        parent_id = None
+        parent_version = None
+        if current:
+            for sub in current_subs:
+                if sub["type"] == type_name:
+                    parent_id = sub["id"]
+                    parent_version = sub["version"]
+                    break
+
+        if path in branch_by_path:
+            parent_pk = branch_by_path[path]
+            parent_row = get_sub_prompt_by_id(conn, parent_pk)
+            if not parent_row:
+                raise CommitError(f"Parent sub-prompt {parent_pk} not found")
+            if parent_row["type"] != type_name:
+                raise CommitError(
+                    f"Parent {parent_pk} has type {parent_row['type']}, expected {type_name}"
+                )
+            parent_id = parent_pk
+            parent_version = parent_row["version"]
+            version = branch_version(parent_version)
+        else:
+            version = increment_version(parent_version)
+
+        new_id = insert_sub_prompt(
+            conn,
+            type=type_name,
+            parent_id=parent_id,
+            version=version,
+            contents=contents,
+            commit_message=message,
+        )
+        conn.commit()
+        type_to_id[type_name] = new_id
+        id_to_version[new_id] = version
+        id_to_type[new_id] = type_name
+        inserted_any = True
+
+    return type_to_id, id_to_version, id_to_type, inserted_any
+
+
+def _build_new_ids(
+    current_type_order: list[str],
+    type_to_id: dict[str, int],
+    current_subs: list,
+    id_to_version: dict[int, str],
+    id_to_type: dict[int, str],
+) -> list[int]:
+    """
+    Build the ordered list of sub-prompt IDs for the new master prompt.
+    For each type in current_type_order: use the ID from type_to_id (committed subs)
+    if present; otherwise look up in current_subs (retained subs) and
+    populate id_to_version/id_to_type so _finish_master can derive the master version.
+    """
+    new_ids: list[int] = []
+    for t in current_type_order:
+        if t in type_to_id:
+            new_ids.append(type_to_id[t])
+        else:
+            for sub in current_subs:
+                if sub["type"] == t:
+                    sid = sub["id"]
+                    new_ids.append(sid)
+                    id_to_version[sid] = sub["version"]
+                    id_to_type[sid] = sub["type"]
+                    break
+    return new_ids
+
+
+def _finish_master(
+    conn,
+    current: dict | None,
+    new_ids: list[int],
+    id_to_version: dict[int, str],
+    id_to_type: dict[int, str],
+    current_by_type: dict[str, str],
+    message: str,
+) -> None:
+    """Clear previous current master, derive version, insert new master as current."""
+    current_version = current["version"] if current else None
+    new_master_version = derive_master_version(
+        current_version,
+        current_by_type,
+        new_ids,
+        id_to_version,
+        id_to_type,
+    )
+    new_contents = ids_to_master_contents(new_ids)
+    with conn:
+        if current:
+            clear_current_master(conn)
+        insert_master_prompt(
+            conn,
+            parent_id=current["id"] if current else None,
+            version=new_master_version,
+            contents=new_contents,
+            is_current=1,
+            commit_message=message,
+        )
+
+
+def _run_commit_full(
+    message: str,
+    cwd: Path,
+    db_path: str,
+    branch_by_path: dict,
+    no_validate: bool,
+) -> None:
+    """Commit all .j2 files in CWD as a new master."""
+    paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
+    files_data = _build_files_data(paths, no_validate)
+    if not files_data:
+        print("Nothing to commit. No .j2 files or no changes.")
+        return
+
+    _check_duplicate_types_in_commit(files_data)
+    _validate_cwd_paths(paths)
+
+    conn = connect(db_path)
+    try:
+        current = get_current_master(conn)
+        current_ids = master_contents_to_ids(current["contents"]) if current else []
+        current_subs = get_sub_prompts_by_ids(conn, current_ids) if current_ids else []
+        current_by_type = {row["type"]: row["version"] for row in current_subs}
+
+        type_to_id, id_to_version, id_to_type, inserted_any = _insert_sub_prompts(
+            conn, files_data, current, current_subs, branch_by_path, message
+        )
+
+        canonical_order = [parse_filename(p.name)[1] for p in paths]
+        new_ids = _build_new_ids(
+            canonical_order, type_to_id, current_subs, id_to_version, id_to_type
+        )
+
+        if not new_ids:
+            print("Nothing to commit. No changes detected.")
+            return
+        if not inserted_any and current and new_ids == current_ids:
+            print("Nothing to commit. No changes detected.")
+            return
+
+        _finish_master(
+            conn, current, new_ids, id_to_version, id_to_type, current_by_type, message
+        )
+    finally:
+        conn.close()
+
+
+def _run_commit_partial(
+    message: str,
+    paths: list[Path],
+    cwd: Path,
+    db_path: str,
+    branch_by_path: dict,
+    no_validate: bool,
+) -> None:
+    """Commit only the specified .j2 files, retaining unspecified types from current master."""
+    all_paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
+    files_data = _build_files_data(paths, no_validate)
+    if not files_data:
+        print("Nothing to commit. No .j2 files or no changes.")
+        return
+
+    _check_duplicate_types_in_commit(files_data)
+    _validate_cwd_paths(all_paths)
+
+    conn = connect(db_path)
+    try:
+        current = get_current_master(conn)
+        current_ids = master_contents_to_ids(current["contents"]) if current else []
+        current_subs = get_sub_prompts_by_ids(conn, current_ids) if current_ids else []
+        current_by_type = {row["type"]: row["version"] for row in current_subs}
+
+        types_in_commit = {type_name for _, _, type_name in files_data}
+        types_in_current = {row["type"] for row in current_subs}
+        if current:
+            new_types = types_in_commit - types_in_current
+            if new_types:
+                raise PartialCommitAddsNewTypeError(
+                    f"Cannot add new types in partial commit: {', '.join(sorted(new_types))}. "
+                    "Commit all files to add new types."
+                )
+
+        canonical_order = [parse_filename(p.name)[1] for p in all_paths]
+        types_needed = types_in_commit | types_in_current
+        current_type_order = [t for t in canonical_order if t in types_needed]
+
+        # Retained types must have a .j2 file in CWD to determine their position.
+        seen_retained: set[str] = set()
+        for row in current_subs:
+            if row["type"] not in types_in_commit:
+                if row["type"] not in canonical_order:
+                    raise PartialCommitMissingCwdFileError(
+                        f"Partial commit cannot retain type '{row['type']}' from current master: "
+                        "no corresponding .j2 file in CWD to determine its position"
+                    )
+                if row["type"] in seen_retained:
+                    raise DuplicateTypeInCurrentError(
+                        f"Current master has duplicate sub-prompt type '{row['type']}'"
+                    )
+                seen_retained.add(row["type"])
+
+        type_to_id, id_to_version, id_to_type, inserted_any = _insert_sub_prompts(
+            conn, files_data, current, current_subs, branch_by_path, message
+        )
+
+        new_ids = _build_new_ids(
+            current_type_order, type_to_id, current_subs, id_to_version, id_to_type
+        )
+
+        if not new_ids:
+            print("Nothing to commit. No changes detected.")
+            return
+        if not inserted_any and new_ids == current_ids:
+            print("Nothing to commit. No changes detected.")
+            return
+
+        _finish_master(
+            conn, current, new_ids, id_to_version, id_to_type, current_by_type, message
+        )
+    finally:
+        conn.close()
+
+
 def run_commit(
     message: str,
     paths: list[Path] | None = None,
@@ -153,7 +433,8 @@ def run_commit(
     Commit sub-prompts and create a new master prompt (making it current).
     Inserts or reuses sub-prompt rows, then inserts a new master_prompts row with
     is_current=1 and clears is_current on the previous master.
-    If paths is None, scan CWD for *.j2.
+    If paths is None, scan CWD for *.j2 (full commit). Otherwise commit only the
+    specified paths (partial commit).
     branch_specs: list of (parent_pk, path) for forced branch versioning.
     """
     if not message:
@@ -161,190 +442,36 @@ def run_commit(
     db_path = get_db_path(cwd)
     cwd = cwd or Path.cwd()
 
-    if paths is None:
-        # glob() returns files in arbitrary order (filesystem-dependent); sort by name
-        # so sub-prompts follow filename prefix order (e.g. 01_intro, 02_body).
-        paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
-        is_full_commit = True
-    else:
-        for p in paths:
-            if not p.exists():
-                raise CommitError(f"Path does not exist: {p}")
-        # Sort by name for consistent sub-prompt order.
-        paths = sorted([p for p in paths if p.name.endswith(".j2")], key=lambda p: p.name)
-        is_full_commit = False
-
-    branch_by_path = {}
+    branch_by_path: dict = {}
     if branch_specs:
         for parent_pk, path in branch_specs:
             path = path.resolve() if not path.is_absolute() else path
             branch_by_path[path] = parent_pk
 
-    files_data: list[tuple[Path, str, str]] = []
-    for p in paths:
-        p = p.resolve() if not p.is_absolute() else p
-        contents = p.read_text()
-        type_name = parse_filename(p.name)[1]
-        if not no_validate:
-            try:
-                validate_jinja2(contents)
-            except TemplateSyntaxError as e:
-                raise CommitError(f"Invalid jinja2 in {p}: {e}") from e
-        files_data.append((p, contents, type_name))
-
-    if not files_data:
-        print("Nothing to commit. No .j2 files or no changes.")
-        return
-
-    # Detect duplicate types in commit (multiple files with same type); raise if any.
-    seen: dict[str, list[str]] = {}
-    for path, _, type_name in files_data:
-        seen.setdefault(type_name, []).append(str(path.name))
-    duplicates = {t: paths for t, paths in seen.items() if len(paths) > 1}
-    if duplicates:
-        dup_desc = "; ".join(f"{t} ({', '.join(p)})" for t, p in duplicates.items())
-        raise DuplicateTypeInCommitError(
-            f"Multiple files with same sub-prompt type in commit: {dup_desc}"
+    if paths is None:
+        _run_commit_full(
+            message=message,
+            cwd=cwd,
+            db_path=db_path,
+            branch_by_path=branch_by_path,
+            no_validate=no_validate,
         )
-
-    all_paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
-    _validate_cwd_paths(all_paths)
-
-    conn = connect(db_path)
-    try:
-        current = get_current_master(conn)
-        current_ids = master_contents_to_ids(current["contents"]) if current else []
-        current_subs = get_sub_prompts_by_ids(conn, current_ids) if current_ids else []
-        current_by_type = {row["type"]: row["version"] for row in current_subs}
-
-        type_to_id: dict[str, int] = {}
-        id_to_version: dict[int, str] = {}
-        id_to_type: dict[int, str] = {}
-        inserted_any = False
-
-        for path, contents, type_name in files_data:
-            existing = get_sub_prompt_by_contents(conn, contents)
-            if existing:
-                type_to_id[type_name] = existing["id"]
-                id_to_version[existing["id"]] = existing["version"]
-                id_to_type[existing["id"]] = existing["type"]
-                continue
-
-            parent_id = None
-            parent_version = None
-            if current:
-                for sub in current_subs:
-                    if sub["type"] == type_name:
-                        parent_id = sub["id"]
-                        parent_version = sub["version"]
-                        break
-
-            if path in branch_by_path:
-                parent_pk = branch_by_path[path]
-                parent_row = get_sub_prompt_by_id(conn, parent_pk)
-                if not parent_row:
-                    raise CommitError(f"Parent sub-prompt {parent_pk} not found")
-                if parent_row["type"] != type_name:
-                    raise CommitError(
-                        f"Parent {parent_pk} has type {parent_row['type']}, expected {type_name}"
-                    )
-                parent_id = parent_pk
-                parent_version = parent_row["version"]
-                version = branch_version(parent_version)
-            else:
-                version = increment_version(parent_version)
-
-            new_id = insert_sub_prompt(
-                conn,
-                type=type_name,
-                parent_id=parent_id,
-                version=version,
-                contents=contents,
-                commit_message=message,
-            )
-            conn.commit()
-            type_to_id[type_name] = new_id
-            id_to_version[new_id] = version
-            id_to_type[new_id] = type_name
-            inserted_any = True
-
-        current_ids = master_contents_to_ids(current["contents"]) if current else []
-        types_in_commit = {type_name for _, _, type_name in files_data}
-        types_in_current = {row["type"] for row in current_subs}
-
-        if current and not is_full_commit:
-            new_types = types_in_commit - types_in_current
-            if new_types:
-                raise PartialCommitAddsNewTypeError(
-                    f"Cannot add new types in partial commit: {', '.join(sorted(new_types))}. "
-                    "Commit all files to add new types."
-                )
-
-        canonical_order = [parse_filename(p.name)[1] for p in all_paths]
-        types_needed = types_in_commit if is_full_commit else (types_in_commit | types_in_current)
-        current_type_order = [t for t in canonical_order if t in types_needed]
-        if not is_full_commit:
-            # Uncommitted types (in current master but not in commit) must have a .j2 file in CWD
-            # so we can determine their position in canonical_order when building the new master.
-            seen_uncommitted: set[str] = set()
-            for row in current_subs:
-                if row["type"] not in types_in_commit:
-                    if row["type"] not in canonical_order:
-                        raise PartialCommitMissingCwdFileError(
-                            f"Partial commit cannot retain type '{row['type']}' from current master: "
-                            "no corresponding .j2 file in CWD to determine its position"
-                        )
-                    if row["type"] in seen_uncommitted:
-                        raise DuplicateTypeInCurrentError(
-                            f"Current master has duplicate sub-prompt type '{row['type']}'"
-                        )
-                    seen_uncommitted.add(row["type"])
-
-        new_ids: list[int] = []
-        for t in current_type_order:
-            if t in type_to_id:
-                new_ids.append(type_to_id[t])
-            elif current:
-                for sub in current_subs:
-                    if sub["type"] == t:
-                        sid = sub["id"]
-                        new_ids.append(sid)
-                        id_to_version[sid] = sub["version"]
-                        id_to_type[sid] = sub["type"]
-                        break
-
-        if not new_ids:
-            print("Nothing to commit. No changes detected.")
-            return
-
-        if not inserted_any and current and new_ids == current_ids:
-            print("Nothing to commit. No changes detected.")
-            return
-
-        current_version = current["version"] if current else None
-        new_master_version = derive_master_version(
-            current_version,
-            current_by_type,
-            new_ids,
-            id_to_version,
-            id_to_type,
+    else:
+        for p in paths:
+            if not p.exists():
+                raise CommitError(f"Path does not exist: {p}")
+        paths = sorted(
+            [p for p in paths if p.name.endswith(".j2")],
+            key=lambda p: p.name,
         )
-
-        new_contents = ids_to_master_contents(new_ids)
-
-        with conn:
-            if current:
-                clear_current_master(conn)
-            insert_master_prompt(
-                conn,
-                parent_id=current["id"] if current else None,
-                version=new_master_version,
-                contents=new_contents,
-                is_current=1,
-                commit_message=message,
-            )
-    finally:
-        conn.close()
+        _run_commit_partial(
+            message=message,
+            paths=paths,
+            cwd=cwd,
+            db_path=db_path,
+            branch_by_path=branch_by_path,
+            no_validate=no_validate,
+        )
 
 
 def run_commit_paths(
