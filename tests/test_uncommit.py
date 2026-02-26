@@ -13,11 +13,11 @@ def test_uncommit_restores_database_state(tmp_path: Path) -> None:
     """Uncommit restores the database to its state before the last commit."""
     db_path = (tmp_path / "gpv.db").resolve()
     (tmp_path / ".gpv").write_text(str(db_path))
-    (tmp_path / "a_intro.j2").write_text("Hello")
-    (tmp_path / "b_body.j2").write_text("Body")
+    (tmp_path / "01_intro.j2").write_text("Hello")
+    (tmp_path / "02_body.j2").write_text("Body")
 
     init.run_init(cwd=tmp_path)
-    commit.run_commit(message="First", paths=[tmp_path / "a_intro.j2"], cwd=tmp_path)
+    commit.run_commit(message="First", paths=[tmp_path / "01_intro.j2"], cwd=tmp_path)
 
     conn = connect(get_db_path(tmp_path))
     try:

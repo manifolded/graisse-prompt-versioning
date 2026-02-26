@@ -187,6 +187,13 @@ Print details of current master prompt: id, version, commit_message, created_at,
 
 ## Error Handling
 
+- **CWD file validation:** Before commit, gpv validates all `.j2` files in CWD.
+  - Prefixes must be numeric only (non-numeric prefixes like `a_intro.j2` are prohibited).
+  - Valid filename structure required (`.j2` suffix, underscore required).
+  - Duplicate prefixes (e.g. `01_intro.j2` and `01_body.j2`) raise `CwdFilenameValidationError`.
+  - Non-consecutive numeric prefixes (e.g. `01_intro.j2` and `03_instruction.j2` missing 02) raise `CwdFilenameValidationError`.
+  - Inconsistent prefix format (e.g. `1_intro.j2` and `02_body.j2` mixing 1- and 2-digit prefixes) raises `CwdFilenameValidationError`.
+  - Applies to both full and partial commits. Failed validation always throws an error.
 - **No defaults:** Every missing required value (DB path, message, paths) raises an error.
 - **Explicit paths:** When paths are required, user must provide them.
 - **No repeated types in master:**

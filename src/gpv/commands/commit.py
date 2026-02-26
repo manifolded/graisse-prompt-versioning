@@ -40,17 +40,23 @@ class PartialCommitMissingCwdFileError(CommitError):
     """Raised when a partial commit would keep a type that has no .j2 file in CWD."""
 
 
-def extract_type_from_filename(filename: str) -> str:
+class CwdFilenameValidationError(CommitError):
+    """Raised when CWD .j2 filenames fail validation (structure, prefixes, ordering)."""
+
+
+def parse_filename(filename: str) -> tuple[str, str]:
     """
-    Extract type from filename *_<type>.j2 -> extract between first underscore and .j2
-    E.g. a_intro.j2 -> intro, a_intro_section.j2 -> intro_section
+    Validate structure and parse filename into (prefix, type_name).
+    Expects {prefix}_{type}.j2 with .j2 suffix and underscore required.
+    Raises ValueError on invalid structure.
     """
     if not filename.endswith(".j2"):
         raise ValueError(f"Filename must end with .j2: {filename}")
     name = filename[:-3]
     if "_" not in name:
         raise ValueError(f"Filename must contain underscore before .j2: {filename}")
-    return name.split("_", 1)[1]
+    prefix, type_name = name.split("_", 1)
+    return prefix, type_name
 
 
 def _index_to_prefix(index: int, total: int) -> str:
@@ -64,10 +70,71 @@ def _index_to_prefix(index: int, total: int) -> str:
 
 def type_to_filename(type_name: str, index: int = 0, total: int = 1) -> str:
     """
-    Reverse of extract_type_from_filename: type + position -> {prefix}_{type}.j2.
+    Reverse of parse_filename (type part): type + position -> {prefix}_{type}.j2.
     The prefix is a zero-padded number (01, 02, ...) from the sub-prompt's order in the master.
     """
     return f"{_index_to_prefix(index, total)}_{type_name}.j2"
+
+
+def _validate_cwd_paths(paths: list[Path]) -> None:
+    """
+    Validate .j2 paths for ordering consistency (numeric prefixes only, duplicate prefixes,
+    valid structure, consistent prefix format).
+    paths: list of .j2 paths being committed (already sorted by name).
+    Raises CwdFilenameValidationError on non-numeric prefix, duplicate prefix, invalid
+    structure, or inconsistent prefix format.
+    """
+    if not paths:
+        return
+
+    prefix_to_filenames: dict[str, list[str]] = {}
+    for p in paths:
+        try:
+            prefix, _ = parse_filename(p.name)
+        except ValueError as e:
+            raise CwdFilenameValidationError(str(e)) from e
+        prefix_to_filenames.setdefault(prefix, []).append(p.name)
+
+    # Check numeric prefixes only
+    non_numeric_files = [
+        f for prefix, filenames in prefix_to_filenames.items()
+        for f in filenames if not prefix.isdigit()
+    ]
+    if non_numeric_files:
+        raise CwdFilenameValidationError(
+            f"Non-numeric prefixes prohibited: {', '.join(sorted(non_numeric_files))}"
+        )
+
+    # Check duplicate prefixes
+    for prefix, filenames in prefix_to_filenames.items():
+        if len(filenames) > 1:
+            raise CwdFilenameValidationError(
+                f"Duplicate prefix '{prefix}': {', '.join(sorted(filenames))}"
+            )
+
+    # Check consecutive ordering and consistent prefix format
+    numeric_prefixes = sorted(
+        (p for p in prefix_to_filenames if p.isdigit()),
+        key=lambda p: int(p),
+    )
+    if numeric_prefixes:
+        # Consistent format: all same digit count
+        lengths = {len(p) for p in numeric_prefixes}
+        if len(lengths) > 1:
+            by_len: dict[int, list[str]] = {}
+            for p in numeric_prefixes:
+                by_len.setdefault(len(p), []).extend(prefix_to_filenames[p])
+            examples = [f for files in by_len.values() for f in files][:3]
+            raise CwdFilenameValidationError(
+                f"Inconsistent prefix format (mixed digit counts): {', '.join(examples)}"
+            )
+        # Consecutive: 1, 2, 3, ...
+        values = [int(p) for p in numeric_prefixes]
+        expected = list(range(1, len(values) + 1))
+        if values != expected:
+            raise CwdFilenameValidationError(
+                f"Non-consecutive numeric prefixes: expected 1..{len(values)}, got {values}"
+            )
 
 
 def validate_jinja2(contents: str) -> None:
@@ -117,7 +184,7 @@ def run_commit(
     for p in paths:
         p = p.resolve() if not p.is_absolute() else p
         contents = p.read_text()
-        type_name = extract_type_from_filename(p.name)
+        type_name = parse_filename(p.name)[1]
         if not no_validate:
             try:
                 validate_jinja2(contents)
@@ -139,6 +206,9 @@ def run_commit(
         raise DuplicateTypeInCommitError(
             f"Multiple files with same sub-prompt type in commit: {dup_desc}"
         )
+
+    all_paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
+    _validate_cwd_paths(all_paths)
 
     conn = connect(db_path)
     try:
@@ -210,18 +280,19 @@ def run_commit(
                     "Commit all files to add new types."
                 )
 
-        all_paths = sorted(cwd.glob("*.j2"), key=lambda p: p.name)
-        canonical_order = [extract_type_from_filename(p.name) for p in all_paths]
+        canonical_order = [parse_filename(p.name)[1] for p in all_paths]
         types_needed = types_in_commit if is_full_commit else (types_in_commit | types_in_current)
         current_type_order = [t for t in canonical_order if t in types_needed]
         if not is_full_commit:
+            # Uncommitted types (in current master but not in commit) must have a .j2 file in CWD
+            # so we can determine their position in canonical_order when building the new master.
             seen_uncommitted: set[str] = set()
             for row in current_subs:
                 if row["type"] not in types_in_commit:
                     if row["type"] not in canonical_order:
                         raise PartialCommitMissingCwdFileError(
-                            f"Partial commit cannot include type '{row['type']}': "
-                            "no corresponding .j2 file in CWD"
+                            f"Partial commit cannot retain type '{row['type']}' from current master: "
+                            "no corresponding .j2 file in CWD to determine its position"
                         )
                     if row["type"] in seen_uncommitted:
                         raise DuplicateTypeInCurrentError(
